@@ -5,6 +5,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, ConfusionMatrixDisplay, classification_report
+from sklearn.neighbors import NearestNeighbors
 
 # --- 1. DATA PREPARATION ---
 df = pd.read_csv('arrivals (1).csv')
@@ -74,38 +76,68 @@ iso_semi.fit(X_train)
 pred_iso_semi_raw = iso_semi.predict(X)
 pred_iso_semi = np.where(pred_iso_semi_raw == -1, 1, 0)
 
+# Model E: DBSCAN (Semi-Supervised)
+# Train on Normal data only
+mask_normal = df_total['ground_truth'] == 0
+X_train_scaled = X_scaled[mask_normal]
+
+db_semi = DBSCAN(eps=0.25, min_samples=4)
+db_semi.fit(X_train_scaled)
+
+core_samples = db_semi.components_
+
+if len(core_samples) == 0:
+    pred_db_semi = np.ones(len(X_scaled)) # All anomalies if no normal clusters found
+else:
+    neigh = NearestNeighbors(n_neighbors=1)
+    neigh.fit(core_samples)
+    dists, _ = neigh.kneighbors(X_scaled)
+    # If distance to nearest core sample > eps, it's an anomaly (1)
+    pred_db_semi = np.where(dists.flatten() > db_semi.eps, 1, 0)
+
 # --- 3. EVALUATION & SAVING ---
 
 models = {
     'DBSCAN (Unsup)': pred_db,
     'Isolation Forest (Unsup)': pred_iso_unsup,
     'K-Means (Unsup)': pred_km,
-    'IsoForest (Semi-Supervised)': pred_iso_semi
+    'IsoForest (Semi-Supervised)': pred_iso_semi,
+    'DBSCAN (Semi-Supervised)': pred_db_semi
 }
 
-print(f"{'Model':<30} | {'F1':<6} | {'Precision':<9} | {'Recall':<6} | {'Accuracy':<8}")
-print("-" * 75)
+# Print Comparison Table
+print(f"{'Model':<30} | {'F1':<6} | {'Prec':<6} | {'Rec':<6} | {'Acc':<6} | {'TN':<4} {'FP':<4} {'FN':<4} {'TP':<4}")
+print("-" * 95)
 
+results = []
 for name, preds in models.items():
+    # Summary Table Metrics
     f1 = f1_score(df_total['ground_truth'], preds)
     prec = precision_score(df_total['ground_truth'], preds)
     rec = recall_score(df_total['ground_truth'], preds)
     acc = np.mean(preds == df_total['ground_truth'])
+    tn, fp, fn, tp = confusion_matrix(df_total['ground_truth'], preds).ravel()
     
-    results.append({
-        'Model': name,
-        'F1': f1,
-        'Precision': prec,
-        'Recall': rec,
-        'Accuracy': acc
-    })
-    
-    print(f"{name:<30} | {f1:.3f}  | {prec:.3f}     | {rec:.3f}  | {acc:.3f}")
+    results.append({'Model': name, 'F1': f1, 'Precision': prec, 'Recall': rec, 'Accuracy': acc, 'TN': tn, 'FP': fp, 'FN': fn, 'TP': tp})
+    print(f"{name:<30} | {f1:.3f}  | {prec:.3f}  | {rec:.3f}  | {acc:.3f}  | {tn:<4} {fp:<4} {fn:<4} {tp:<4}")
+
+# Print Detailed Reports
+print("\n" + "="*40)
+print("DETAILED CLASSIFICATION REPORTS")
+print("="*40)
+
+for name, preds in models.items():
+    print(f"\n--- {name} Evaluation ---")
+    print(classification_report(df_total['ground_truth'], preds))
+    print("Confusion Matrix:")
+    print(confusion_matrix(df_total['ground_truth'], preds))
+    print("-" * 40)
 
 # --- 4. VISUALIZATION ---
-fig, axes = plt.subplots(4, 1, figsize=(12, 16))
+fig, axes = plt.subplots(len(models), 1, figsize=(12, 4*len(models)))
 colors = {'DBSCAN (Unsup)': 'orange', 'Isolation Forest (Unsup)': 'purple', 
-          'K-Means (Unsup)': 'cyan', 'IsoForest (Semi-Supervised)': 'lime'}
+          'K-Means (Unsup)': 'cyan', 'IsoForest (Semi-Supervised)': 'lime',
+          'DBSCAN (Semi-Supervised)': 'magenta'}
 
 for i, (name, preds) in enumerate(models.items()):
     ax = axes[i]
@@ -130,3 +162,23 @@ for i, (name, preds) in enumerate(models.items()):
 plt.tight_layout()
 plt.savefig('verification_plots/final_comparison.png', dpi=300)
 print("\nPlot saved to 'verification_plots/final_comparison.png'")
+
+# --- 5. CONFUSION MATRICES (Unsupervised) ---
+# User requested specifically for the three unsupervised methods
+unsup_models = {k: v for k, v in models.items() if '(Unsup)' in k}
+
+fig_cm, axes_cm = plt.subplots(1, 3, figsize=(18, 5))
+fig_cm.suptitle("Confusion Matrices: Unsupervised Models", fontsize=16)
+
+for i, (name, preds) in enumerate(unsup_models.items()):
+    ax = axes_cm[i]
+    cm = confusion_matrix(df_total['ground_truth'], preds)
+    # Labels: 0=Normal, 1=Anomaly
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Normal', 'Anomaly'])
+    disp.plot(ax=ax, cmap='Blues', values_format='d', colorbar=False)
+    ax.set_title(name)
+    ax.grid(False) # Disable grid for CM
+
+plt.tight_layout()
+plt.savefig('verification_plots/unsupervised_confusion_matrices.png', dpi=300)
+print("Confusion matrices saved to 'verification_plots/unsupervised_confusion_matrices.png'")
